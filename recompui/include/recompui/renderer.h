@@ -54,6 +54,11 @@ namespace recompui {
         void disable_texture_pack(const recomp::mods::ModHandle& mod);
         void secondary_enable_texture_pack(const std::string& mod_id);
         void secondary_disable_texture_pack(const std::string& mod_id);
+        // Texture pack (directory or zip) of the active mod profile, loaded with the highest priority.
+        // An empty path removes it.
+        void set_profile_texture_pack(const std::filesystem::path& path);
+        // Refresh rates (Hz, ascending) the primary display offers in any mode. Empty if unknown.
+        std::vector<uint32_t> get_display_refresh_rates();
 
         // Texture pack enable option. Must be an enum with two options.
         // The first option is treated as disabled and the second option is treated as enabled.

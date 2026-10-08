@@ -3,6 +3,10 @@
 #include "recompui/renderer.h"
 #include "util/steam_deck.h"
 
+#include <algorithm>
+#include <cstdlib>
+#include <iterator>
+
 static bool created_graphics_config = false;
 
 namespace recompui {
@@ -24,6 +28,54 @@ namespace recompui {
             {ultramodern::renderer::Resolution::Original2x, "Original2x", "Original 2x"},
             {ultramodern::renderer::Resolution::Auto, "Auto", "Auto"},
         };
+
+        // [wcw] Output resolution picker: the window's client size when windowed, the monitor's
+        // display mode when fullscreen (restored on leaving fullscreen). Desktop = stock behaviour.
+        struct OutputResolution { uint32_t width; uint32_t height; };
+        static const OutputResolution output_resolutions[] = {
+            { 0, 0 }, { 1280, 720 }, { 1600, 900 }, { 1920, 1080 }, { 1920, 1200 },
+            { 2560, 1440 }, { 2560, 1600 }, { 3840, 2160 }, { 3840, 2400 },
+        };
+        static EnumOptionVector output_resolution_options = {
+            {0u, "Desktop", "Desktop"},
+            {1u, "1280x720", "720p"},
+            {2u, "1600x900", "900p"},
+            {3u, "1920x1080", "1080p"},
+            {4u, "1920x1200", "1920x1200"},
+            {5u, "2560x1440", "1440p"},
+            {6u, "2560x1600", "2560x1600"},
+            {7u, "3840x2160", "4K"},
+            {8u, "3840x2400", "3840x2400"},
+        };
+
+        // [wcw] Framerate: 30 fps (the game's own rate, no generated frames) or 60/90/120 fps (generated frames, and in
+        // fullscreen the display switches to that refresh rate). Value = fps. 90 and 120 are only offered when the
+        // display has that rate (59/89/119 Hz count as 60/90/120).
+        static uint32_t display_rate_for(uint32_t fps) {
+            for (uint32_t rate : recompui::renderer::get_display_refresh_rates()) {
+                if ((rate + 1 >= fps) && (rate <= fps + 1)) {
+                    return rate;
+                }
+            }
+
+            return 0;
+        }
+
+        static std::vector<recomp::config::ConfigOptionEnumOption> make_framerate_options() {
+            std::vector<recomp::config::ConfigOptionEnumOption> options = {
+                {30u, "30", "30 fps (Original)"},
+                {60u, "60", "60 fps"},
+            };
+
+            const bool ratesKnown = !recompui::renderer::get_display_refresh_rates().empty();
+            for (uint32_t fps : { 90u, 120u }) {
+                if (!ratesKnown || (display_rate_for(fps) != 0)) {
+                    options.emplace_back(fps, std::to_string(fps), std::to_string(fps) + " fps");
+                }
+            }
+
+            return options;
+        }
 
         enum class DownsamplingOption {
             Off = 0,
@@ -75,12 +127,6 @@ namespace recompui {
             {ultramodern::renderer::Antialiasing::MSAA2X, "MSAA2X", "2X"},
             {ultramodern::renderer::Antialiasing::MSAA4X, "MSAA4X", "4X"},
             // {ultramodern::renderer::Antialiasing::MSAA8X, "MSAA8X"},
-        };
-
-        static EnumOptionVector refresh_rate_options = {
-            {ultramodern::renderer::RefreshRate::Original, "Original"},
-            {ultramodern::renderer::RefreshRate::Display, "Display"},
-            {ultramodern::renderer::RefreshRate::Manual, "Manual"},
         };
 
         static EnumOptionVector hpfb_options = {
@@ -151,18 +197,6 @@ namespace recompui {
             get_graphics_config().update_option_enum_details(graphics::options::ds_option, get_downsampling_details(res_option, ds_opt));
         }
 
-        static std::string get_framerate_text(uint32_t refresh_rate) {
-            // [wcw fix] Framerate is LOCKED to Original for this game — see the lock below.
-            return
-                "Sets the game's output framerate. This option does not affect gameplay."
-                "<br />"
-                "<br />"
-                "<recomp-color warning>Locked to Original for this game:</recomp-color> frame interpolation warps geometry with this engine's display lists (it submits pre-multiplied matrices only, which defeats the renderer's motion matching)."
-                "<br />"
-                "<br />"
-                "<recomp-color primary>Detected display refresh rate: " + std::to_string(refresh_rate) + "hz</recomp-color>";
-        }
-
         static void apply_graphics_config() {
             ultramodern::renderer::GraphicsConfig new_config;
             new_config.developer_mode = get_graphics_bool_value(graphics::options::developer_mode);
@@ -172,11 +206,31 @@ namespace recompui {
             new_config.api_option = get_graphics_enum_value<ultramodern::renderer::GraphicsApi>(graphics::options::api_option);
             new_config.ar_option = get_graphics_enum_value<ultramodern::renderer::AspectRatio>(graphics::options::ar_option);
             new_config.msaa_option = get_graphics_enum_value<ultramodern::renderer::Antialiasing>(graphics::options::msaa_option);
-            new_config.rr_option = get_graphics_enum_value<ultramodern::renderer::RefreshRate>(graphics::options::rr_option);
+
             new_config.hpfb_option = get_graphics_enum_value<ultramodern::renderer::HighPrecisionFramebuffer>(graphics::options::hpfb_option);
-            new_config.rr_manual_value = get_graphics_number_value<int>(graphics::options::rr_manual_value);
 
             new_config.ds_option = get_graphics_enum_value<int>(graphics::options::ds_option);
+
+            uint32_t output_index = get_graphics_enum_value<uint32_t>(graphics::options::output_res_option);
+            if (output_index >= std::size(output_resolutions)) {
+                output_index = 0;
+            }
+            new_config.output_width = int(output_resolutions[output_index].width);
+            new_config.output_height = int(output_resolutions[output_index].height);
+            const uint32_t fps = get_graphics_enum_value<uint32_t>(graphics::options::framerate_option);
+            if (fps <= 30) {
+                // The game's own frames only; the display stays at the 60 fps rate (no 30 Hz mode, and switching
+                // between 30 and 60 fps never changes the display mode).
+                new_config.rr_option = ultramodern::renderer::RefreshRate::Original;
+                new_config.rr_manual_value = 30;
+                new_config.output_refresh = int(display_rate_for(60));
+            }
+            else {
+                new_config.rr_option = ultramodern::renderer::RefreshRate::Manual;
+                new_config.rr_manual_value = int(fps);
+                const uint32_t displayRate = display_rate_for(fps);
+                new_config.output_refresh = int((displayRate != 0) ? displayRate : fps);
+            }
 
             ultramodern::renderer::set_graphics_config(new_config);
         }
@@ -204,10 +258,7 @@ namespace recompui {
         }
 
         void graphics::update_refresh_rate(uint32_t refresh_rate) {
-            recomp::config::Config& config = get_graphics_config();
-            std::string framerate_text = get_framerate_text(refresh_rate);
-            config.update_option_description(graphics::options::rr_option, framerate_text);
-            config.update_option_description(graphics::options::rr_manual_value, framerate_text);
+            (void)refresh_rate; // The Framerate option lists fixed, tested rates instead.
         }
 
         void graphics::toggle_fullscreen() {
@@ -234,9 +285,20 @@ namespace recompui {
             );
 
             config.add_enum_option(
-                graphics::options::res_option,
+                graphics::options::output_res_option,
                 "Resolution",
-                "Sets the output resolution of the game. <recomp-color primary>Original</recomp-color> matches the game's original 240p resolution. <recomp-color primary>Original 2x</recomp-color> will render at 480p. <recomp-color primary>Auto</recomp-color> will scale based on the game window's resolution.",
+                "Sets the game's screen resolution. In <recomp-color primary>Fullscreen</recomp-color> the display switches to this resolution while the game is fullscreen and goes back to your desktop resolution afterwards. In <recomp-color primary>Windowed</recomp-color> mode the window is sized to it (if it fits on screen). <recomp-color primary>Desktop</recomp-color> uses your desktop resolution."
+                "<br />"
+                "<br />"
+                "Resolutions your display doesn't support fall back to the desktop resolution.",
+                output_resolution_options,
+                0u
+            );
+
+            config.add_enum_option(
+                graphics::options::res_option,
+                "Internal Resolution",
+                "Sets the resolution the game renders at internally. <recomp-color primary>Auto</recomp-color> renders at the full screen resolution above. <recomp-color primary>Original</recomp-color> matches the game's original 240p resolution. <recomp-color primary>Original 2x</recomp-color> will render at 480p.",
                 resolution_options,
                 ultramodern::renderer::Resolution::Auto
             );
@@ -300,29 +362,17 @@ namespace recompui {
                 wm_default()
             );
 
+            static const std::vector<recomp::config::ConfigOptionEnumOption> framerate_options = make_framerate_options();
             config.add_enum_option(
-                graphics::options::rr_option,
+                graphics::options::framerate_option,
                 "Framerate",
-                get_framerate_text(60),
-                refresh_rate_options,
-                // [wcw fix] Default to the display rate: 60Hz frame interpolation works for this game.
-                ultramodern::renderer::RefreshRate::Display
+                "Sets how many frames per second are shown. The game itself runs at 30 frames per second: <recomp-color primary>30 fps (Original)</recomp-color> shows exactly those; higher settings add smooth in-between frames. This does not affect gameplay."
+                "<br />"
+                "<br />"
+                "In <recomp-color primary>Fullscreen</recomp-color> the display switches to the matching refresh rate (your desktop's rate comes back afterwards); <recomp-color primary>90</recomp-color> and <recomp-color primary>120 fps</recomp-color> are only listed when your display supports them. In <recomp-color primary>Windowed</recomp-color> mode the framerate is limited to your desktop's refresh rate.",
+                framerate_options,
+                60u
             );
-
-            config.add_number_option(
-                graphics::options::rr_manual_value,
-                "",
-                get_framerate_text(60),
-                20.0, 240.0, 1.0, 0, false, 60.0
-            );
-            {
-                config.add_option_hidden_dependency(
-                    graphics::options::rr_manual_value,
-                    graphics::options::rr_option,
-                    ultramodern::renderer::RefreshRate::Original,
-                    ultramodern::renderer::RefreshRate::Display
-                );
-            }
 
             config.add_enum_option(
                 graphics::options::msaa_option,

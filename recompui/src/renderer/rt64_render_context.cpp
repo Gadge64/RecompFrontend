@@ -1,3 +1,5 @@
+#include <atomic>
+#include <mutex>
 #include <memory>
 #include <cstring>
 #include <variant>
@@ -46,6 +48,13 @@ struct TexturePackUpdateAction {
 using TexturePackAction = std::variant<TexturePackEnableAction, TexturePackDisableAction, TexturePackSecondaryEnableAction, TexturePackSecondaryDisableAction, TexturePackUpdateAction>;
 
 static moodycamel::ConcurrentQueue<TexturePackAction> texture_pack_action_queue;
+// Profile texture pack: the latest request wins. Requests can come from different threads (startup and
+// launcher UI), so they are not queued (the action queue only keeps order per producer).
+static std::mutex profile_texture_pack_mutex;
+static std::filesystem::path profile_texture_pack_requested;
+static std::atomic<uint64_t> profile_texture_pack_version{ 0 };
+static uint64_t profile_texture_pack_applied_version = 0;
+static std::filesystem::path profile_texture_pack;
 
 unsigned int MI_INTR_REG = 0;
 
@@ -315,7 +324,8 @@ renderer::RT64Context::RT64Context(uint8_t* rdram, ultramodern::renderer::Window
         return;
     }
 
-    // Set the application's fullscreen state.
+    // Set the application's output resolution and fullscreen state.
+    app->setOutputResolution(uint32_t(cur_config.output_width), uint32_t(cur_config.output_height), uint32_t(cur_config.output_refresh));
     app->setFullScreen(cur_config.wm_option == ultramodern::renderer::WindowMode::Fullscreen);
 
     // Check if the selected device actually supports MSAA sample positions and MSAA for for the formats that will be used
@@ -371,6 +381,12 @@ void renderer::RT64Context::shutdown() {
 bool renderer::RT64Context::update_config(const ultramodern::renderer::GraphicsConfig& old_config, const ultramodern::renderer::GraphicsConfig& new_config) {
     if (old_config == new_config) {
         return false;
+    }
+
+    // Output resolution first, so entering fullscreen switches straight to the new mode.
+    if ((new_config.output_width != old_config.output_width) || (new_config.output_height != old_config.output_height) ||
+        (new_config.output_refresh != old_config.output_refresh)) {
+        app->setOutputResolution(uint32_t(new_config.output_width), uint32_t(new_config.output_height), uint32_t(new_config.output_refresh));
     }
 
     if (new_config.wm_option != old_config.wm_option) {
@@ -448,6 +464,13 @@ void renderer::RT64Context::check_texture_pack_actions() {
         }, cur_action);
     }
 
+    if (profile_texture_pack_version.load() != profile_texture_pack_applied_version) {
+        std::lock_guard lock(profile_texture_pack_mutex);
+        profile_texture_pack = profile_texture_pack_requested;
+        profile_texture_pack_applied_version = profile_texture_pack_version.load();
+        packs_changed = true;
+    }
+
     // If any packs were disabled, unload all packs and load all the active ones.
     if (packs_changed) {
         // Sort the enabled texture packs in reverse order so that earlier ones override later ones.
@@ -470,6 +493,11 @@ void renderer::RT64Context::check_texture_pack_actions() {
         replacement_directories.reserve(enabled_texture_packs.size());
         for (const std::string &mod_id : sorted_texture_packs) {
             replacement_directories.emplace_back(RT64::ReplacementDirectory(recomp::mods::get_mod_filename(mod_id)));
+        }
+
+        // The last directory has the highest priority.
+        if (!profile_texture_pack.empty()) {
+            replacement_directories.emplace_back(RT64::ReplacementDirectory(profile_texture_pack));
         }
 
         if (!replacement_directories.empty()) {
@@ -510,6 +538,29 @@ bool renderer::RT64HighPrecisionFBEnabled() {
 
 void renderer::trigger_texture_pack_update() {
     texture_pack_action_queue.enqueue(TexturePackUpdateAction{});
+}
+
+std::vector<uint32_t> renderer::get_display_refresh_rates() {
+    std::vector<uint32_t> rates;
+#ifdef _WIN32
+    DEVMODEW mode = {};
+    mode.dmSize = sizeof(mode);
+    for (DWORD i = 0; EnumDisplaySettingsW(nullptr, i, &mode); i++) {
+        const uint32_t rate = uint32_t(mode.dmDisplayFrequency);
+        if ((rate >= 50) && (std::find(rates.begin(), rates.end(), rate) == rates.end())) {
+            rates.emplace_back(rate);
+        }
+    }
+
+    std::sort(rates.begin(), rates.end());
+#endif
+    return rates;
+}
+
+void renderer::set_profile_texture_pack(const std::filesystem::path& path) {
+    std::lock_guard lock(profile_texture_pack_mutex);
+    profile_texture_pack_requested = path;
+    profile_texture_pack_version++;
 }
 
 void renderer::enable_texture_pack(const recomp::mods::ModContext& context, const recomp::mods::ModHandle& mod) {

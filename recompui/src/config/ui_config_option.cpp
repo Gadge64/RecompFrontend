@@ -120,26 +120,49 @@ ConfigOptionEnum::ConfigOptionEnum(
     // Negates the extra padding that radio tabs automatically add.
     name_label->set_margin_bottom(4.0f);
 
-    radio = context.create_element<Radio>(wrapper);
-    radio->set_focus_callback([this](bool active) {
-        if (active) {
-            this->on_hover(this->option_id);
+    auto &enum_opt = config->get_option_config<recomp::config::ConfigOptionEnum>(this->option_index);
+
+    // [wcw] More than this many choices overflow the row of radio tabs (they overlap), so
+    // those options get a dropdown instead. Select values are the option's index as a string.
+    constexpr size_t max_radio_options = 5;
+    if (enum_opt.options.size() > max_radio_options) {
+        std::vector<SelectOption> select_options;
+        for (uint32_t i = 0; i < enum_opt.options.size(); i++) {
+            select_options.emplace_back(enum_opt.options[i].name, std::to_string(i));
         }
-    });
-    radio->add_index_changed_callback([this](uint32_t index) {
-        auto &enum_opt = this->config->get_option_config<recomp::config::ConfigOptionEnum>(this->option_index);
-        if (index < enum_opt.options.size()) {
-            this->set_option_value(this->option_id, enum_opt.options[index].value);
+
+        // Select fills its parent's width, so give it a fixed-width container.
+        Element *select_container = context.create_element<Element>(wrapper, 0, "div", false);
+        select_container->set_width(320.0f, Unit::Dp);
+        select = context.create_element<Select>(select_container, select_options);
+        select->add_change_callback([this](SelectOption &option, int option_index) {
+            auto &enum_opt = this->config->get_option_config<recomp::config::ConfigOptionEnum>(this->option_index);
+            if ((option_index >= 0) && (size_t(option_index) < enum_opt.options.size())) {
+                this->set_option_value(this->option_id, enum_opt.options[option_index].value);
+            }
+        });
+    }
+    else {
+        radio = context.create_element<Radio>(wrapper);
+        radio->set_focus_callback([this](bool active) {
+            if (active) {
+                this->on_hover(this->option_id);
+            }
+        });
+        radio->add_index_changed_callback([this](uint32_t index) {
+            auto &enum_opt = this->config->get_option_config<recomp::config::ConfigOptionEnum>(this->option_index);
+            if (index < enum_opt.options.size()) {
+                this->set_option_value(this->option_id, enum_opt.options[index].value);
+            }
+        });
+
+        for (uint32_t i = 0; i < enum_opt.options.size(); i++) {
+            radio->add_option(enum_opt.options[i].name);
         }
-    });
+    }
 
     details_label = context.create_element<Label>(wrapper, "", theme::Typography::LabelXS);
     details_label->set_color(theme::color::Primary);
-
-    auto &enum_opt = config->get_option_config<recomp::config::ConfigOptionEnum>(this->option_index);
-    for (uint32_t i = 0; i < enum_opt.options.size(); i++) {
-        radio->add_option(enum_opt.options[i].name);
-    }
 
     update_value();
     update_enum_details();
@@ -153,12 +176,19 @@ void ConfigOptionEnum::update_value() {
     auto &enum_opt = config->get_option_config<recomp::config::ConfigOptionEnum>(this->option_index);
     for (uint32_t i = 0; i < enum_opt.options.size(); i++) {
         if (enum_opt.options[i].value == option_value) {
-            radio->set_index(i);
+            if (select != nullptr) {
+                select->set_selection(std::to_string(i));
+            }
+            else {
+                radio->set_index(i);
+            }
             return;
         }
     }
     // No matching option, set invalid index so no option is selected
-    radio->set_index(enum_opt.options.size());
+    if (radio != nullptr) {
+        radio->set_index(enum_opt.options.size());
+    }
 };
 
 void ConfigOptionEnum::update_disabled() {
@@ -176,6 +206,12 @@ void ConfigOptionEnum::update_enum_details() {
 
 void ConfigOptionEnum::update_enum_disabled() {
     bool all_disabled = get_disabled();
+    if (select != nullptr) {
+        // The dropdown has no per-choice disabling; it is enabled or not as a whole.
+        select->set_enabled(!all_disabled);
+        return;
+    }
+
     auto &enum_opt = config->get_option_config<recomp::config::ConfigOptionEnum>(option_index);
     for (uint32_t i = 0; i < enum_opt.options.size(); i++) {
         bool enum_disabled = all_disabled || config->get_enum_option_disabled(option_index, i);
