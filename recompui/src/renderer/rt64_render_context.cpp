@@ -5,6 +5,14 @@
 #include <variant>
 #include <algorithm>
 
+#if !defined(_WIN32) && defined(__has_include)
+#   if __has_include(<SDL.h>)
+#       include <SDL.h>
+#   else
+#       include <SDL2/SDL.h>
+#   endif
+#endif
+
 #include "hle/rt64_application.h"
 #include "rt64_render_hooks.h"
 #include "overloaded.h"
@@ -553,6 +561,40 @@ std::vector<uint32_t> renderer::get_display_refresh_rates() {
     }
 
     std::sort(rates.begin(), rates.end());
+#else
+    // Linux (incl. Steam Deck / gamescope): no display mode switching, so the game always runs at
+    // the desktop rate -- report only that. The graphics tab is built before the game window
+    // initialises SDL video, when every SDL display query returns nothing (an empty list made the
+    // menu offer 90/120 on a 60Hz Deck), so bring the video subsystem up just for the query.
+    const bool video_was_up = (SDL_WasInit(SDL_INIT_VIDEO) != 0);
+    if (video_was_up || (SDL_InitSubSystem(SDL_INIT_VIDEO) == 0)) {
+        for (int display = 0; display < SDL_GetNumVideoDisplays(); display++) {
+            SDL_DisplayMode mode;
+            if (SDL_GetDesktopDisplayMode(display, &mode) != 0) {
+                continue;
+            }
+
+            const uint32_t rate = uint32_t(mode.refresh_rate);
+            if ((rate >= 50) && (std::find(rates.begin(), rates.end(), rate) == rates.end())) {
+                rates.emplace_back(rate);
+            }
+        }
+
+        if (!video_was_up) {
+            SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        }
+    }
+
+    std::sort(rates.begin(), rates.end());
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        fprintf(stderr, "[nomercy] display refresh rates:");
+        for (uint32_t rate : rates) {
+            fprintf(stderr, " %u", rate);
+        }
+        fprintf(stderr, rates.empty() ? " (none detected)\n" : "\n");
+    }
 #endif
     return rates;
 }
